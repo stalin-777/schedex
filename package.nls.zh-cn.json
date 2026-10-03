@@ -1,0 +1,7 @@
+{
+  "extension.description": "定时向现有或新的 Codex 对话发送提示。",
+  "command.schedule": "定时发送提示",
+  "command.manage": "已计划的提示",
+  "command.bind": "使用 Copy deeplink 中的对话",
+  "command.diagnose": "UI 诊断"
+}

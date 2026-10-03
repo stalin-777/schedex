@@ -1,0 +1,7 @@
+{
+  "extension.description": "Планируйте отправку запросов в существующий или новый разговор Codex.",
+  "command.schedule": "Отложенная отправка",
+  "command.manage": "Запланированные отправки",
+  "command.bind": "Использовать ветку из Copy deeplink",
+  "command.diagnose": "Диагностика UI"
+}

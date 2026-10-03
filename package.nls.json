@@ -1,0 +1,7 @@
+{
+  "extension.description": "Schedule prompts for existing or new Codex conversations.",
+  "command.schedule": "Schedule prompt",
+  "command.manage": "Scheduled prompts",
+  "command.bind": "Use thread from Copy deeplink",
+  "command.diagnose": "UI diagnostics"
+}
