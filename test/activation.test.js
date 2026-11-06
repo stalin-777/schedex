@@ -31,6 +31,6 @@ test('activation registers commands and restores the status item', async () => {
   assert.equal(statusBar.visible, true);
   assert.match(statusBar.text, /^\$\(schedex-schedule-send\) Schedex/);
   assert.equal(statusBar.command, 'schedex.schedulePrompt');
-  assert.equal(context.subscriptions.length, 5);
+  assert.equal(context.subscriptions.length, 6);
   extension.deactivate();
 });

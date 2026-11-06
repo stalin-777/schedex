@@ -19,7 +19,7 @@ for (const scenario of ['handoff', 'earlier', 'later', 'removed', 'both-active']
     const sends = [];
     let observed = [];
     let ready = false;
-    const runtime = { runCodex: async () => { sends.push(Date.now()); await delay(10); return { code: 0 }; } };
+    const runtime = { queuePrompt: async () => { sends.push(Date.now()); await delay(10); return { id: 'queue-1' }; } };
     const a = createJobHost(folder, { runtime });
     const b = createJobHost(folder, { runtime, onChange: () => { observed = b.jobs.getJobs(); ready = true; } });
     t.after(async () => {
@@ -79,7 +79,7 @@ test('a timer waiting for storage rechecks a postponed task and survives the edi
       if (args[0] === a.locks.getLockPath('job:postponed')) released();
     }
   };
-  const runtime = { runCodex: async () => { sends.push(Date.now()); return { code: 0 }; } };
+  const runtime = { queuePrompt: async () => { sends.push(Date.now()); return { id: 'queue-1' }; } };
   const a = createJobHost(folder, { io, runtime });
   const editorIo = {
     ...fs,

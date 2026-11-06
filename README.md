@@ -1,104 +1,92 @@
 # Schedex
 
-**Schedule a prompt for an existing or new Codex conversation and continue automatically after your usage limit resets.**
+[![Marketplace installs](https://vsmarketplacebadges.dev/installs-short/IThlet.schedex.svg)](https://marketplace.visualstudio.com/items?itemName=IThlet.schedex)
+[![GitHub stars](https://img.shields.io/github/stars/stalin-777/schedex?style=flat&label=stars)](https://github.com/stalin-777/schedex)
 
-Schedex helps when Codex reaches its 5-hour usage limit while a task is still in progress. Schedule a follow-up prompt now, and Schedex sends it to the selected Codex conversation later or starts a clean one.
+**Schedule prompts for Codex in VS Code.**
+
+Send a prompt later, continue after usage limits reset, or schedule work in a new conversation.
 
 ![Schedex scheduling panel with thread selection, date and time controls, prompt field, and scheduled tasks](docs/screenshot.png)
 
 ## Quick start
 
-1. Open the Codex conversation you want to continue, or choose **New thread** in Schedex.
-2. Click the **Schedex** calendar/send icon in the Codex header, or right-click inside Codex and choose **Schedule prompt**.
-3. Check the selected thread and send time. When available, Schedex suggests **5-hour reset + 1 minute** automatically.
-4. Choose an existing conversation or **New thread**, edit the prompt, and click **Schedule**.
+Requires **VS Code 1.106.0+**, the official **OpenAI Codex** extension, and **ChatGPT sign-in**. A separate Codex CLI installation is not needed.
 
-After scheduling, the task appears in the **Scheduled** list below the form. The form keeps its values, so you can change the time or other fields to schedule another task. You can edit or remove an existing task from the list.
+1. Click the **Schedex** calendar/send icon in the Codex header, or right-click inside Codex and choose **Schedule prompt**.
+2. Select a recent conversation or **New thread**. Search by title, preview, or thread ID.
+3. Choose a send mode, enter your prompt, and click **Schedule**.
 
-## Thread selection
+Tasks appear below the form, where you can edit or remove them. The form keeps its values for scheduling another task. The Schedex status-bar item opens the panel; **Schedex: Scheduled prompts** also offers immediate check, send, and retry actions.
 
-The scheduling tab loads recent Codex conversations into a searchable selector. Search by:
+## Send modes
 
-- conversation title;
-- preview text;
-- thread UUID.
+| Mode | Behavior |
+| --- | --- |
+| **When Codex becomes available** | Checks immediately, then periodically until quota and connectivity allow sending. Considers 5-hour, weekly, and selected-model limits. |
+| **At a specified time** | Sends at your chosen date and time. When usage data is available, suggests the next relevant reset + 1 minute. |
 
-Schedex tries to select the currently open conversation automatically. You can always choose another thread. If a Codex build does not expose enough context, **Copy deeplink** is available as a fallback.
+**Maximum waiting period** is a deadline, not a delay: 8 days by default, adjustable from 1 to 30 days. Waiting tasks show the reason, next check, and deadline. **Check now** requests a fresh check without resetting the account binding or attempt budget.
 
-Choose **New thread** to start a fresh Codex conversation when the task is sent. Schedex saves the new thread ID before sending the prompt, so retries use the same conversation.
+Availability mode needs Codex to confirm readiness. If that information is unavailable, update Codex or use a specified send time. Temporary connection failures retry with backoff; account or model problems pause the task. Edit and save to resume it.
 
-## Date and time
+VS Code must be running to send. Tasks persist across restarts; overdue tasks and availability checks resume when Schedex starts again.
 
-When the current 5-hour usage window is available, Schedex suggests **reset time + 1 minute**. If Codex is still rate-limited at that moment, Schedex retries every two minutes, up to five times.
+## Conversations and models
 
-## Language
+**Existing thread** keeps its model and reasoning effort from Codex and can remain open while a prompt is queued. Codex's sidebar may not expose the current conversation; in that case, choose it from the list. You can also use Codex **Copy deeplink**, then **Schedex: Use thread from Copy deeplink**.
 
-Schedex follows the **VS Code display language** automatically.
+**New thread** creates a fresh conversation. You can choose a model and supported reasoning effort, or leave **Default (Codex settings)** selected. The selection applies to the scheduled prompt; later messages keep the conversation's prior settings.
 
-Included UI languages:
+New conversations run in the background. **Open in Codex** becomes available after execution; the conversation may not appear in Codex's list before then.
 
-- English;
-- Russian;
-- Simplified Chinese.
+## Conversation changes and templates
 
-Other VS Code display languages fall back to English.
+For existing conversations, choose what happens if messages change after scheduling:
 
-To change the language, open the Command Palette and run **Configure Display Language**, choose a language, then restart or reload VS Code when prompted.
+- **Send anyway** — the default for custom prompts.
+- **Skip sending** — the default for **Continue**.
+- **Ask for confirmation** — keeps the task pending until you choose **Send once** or **Skip**. Confirmation survives restarts.
 
-## Platforms
+Protected tasks pause if history cannot be checked. Saving an edited task establishes a fresh baseline. The check happens before handoff to Codex; later conversation changes cannot cancel an accepted prompt.
 
-Schedex is designed to work with the official Codex extension on:
+Built-in templates include **Continue**, **Review changes**, **Run tests**, and **Summarize progress**. **Save as template** stores your own prompt and conversation-change policy locally. Selecting a template only fills the form.
 
-- Windows;
-- macOS (Intel and Apple Silicon);
-- Linux;
-- VS Code Remote — WSL.
+## Task history
 
-Prompt delivery has been manually verified in WSL with the official Codex extension.
+**History** keeps sent and cancelled tasks, their status, conversation, and available timestamps. **Queued in Codex** means waiting for execution; **Delivered to Codex** means delivery is confirmed but completion is unknown. New-thread tasks stay **Running** until finished.
 
-## Requirements
+Statuses refresh every 30 seconds for up to 8 days. Use **Refresh status** to check again manually. Lists have 25 entries per page; **Clear finished history** removes finished records while retaining queued, running, and unconfirmed work.
 
-- Visual Studio Code **1.106.0 or later**;
-- the official **OpenAI Codex** extension (`openai.chatgpt`).
+**Schedex: History Retention Days** enables automatic cleanup of old finished records. The default **0** keeps them until you clear them.
 
-A separate global Codex CLI installation is not required.
+## Privacy and limits
 
-## When VS Code is closed
+Tasks are bound to the account selected when saved, in both send modes. Changed or unavailable authentication pauses sending. Older tasks without a binding must be edited and saved again; resaving explicitly binds the current account.
 
-Schedex runs inside the VS Code extension host, not as a system service. It cannot send while that extension host is completely stopped.
+Schedex does not automatically resend an accepted prompt. If acceptance is uncertain, the task shows **Needs review**: check the conversation before retrying. **Move to History** preserves this uncertainty and keeps traceable results under monitoring; it does not cancel a prompt in Codex. Account checks cannot recall a prompt already accepted by Codex.
 
-Scheduled jobs are stored persistently. If a send time passes while VS Code is closed, the overdue job is processed when Schedex starts again.
+Prompts and templates are stored locally as plain text in VS Code extension storage. Schedex adds no cloud service; communication uses the bundled Codex runtime, with prompt text excluded from process command-line arguments.
 
-## Scheduled prompts
+Limits: **64 KiB** of UTF-8 text per prompt, **100** custom templates, and **16 MiB** per task/template store. Clear finished history or unused templates if storage fills up.
 
-The Schedex status-bar item shows pending jobs and opens the scheduling panel. In the **Scheduled** list you can:
+## Compatibility and support
 
-- edit the thread, prompt, or send time;
-- remove a scheduled or failed job.
+Designed for Windows, macOS (Intel and Apple Silicon), Linux, and WSL. Prompt delivery has been manually verified in WSL. The interface follows the VS Code display language: English, Russian, and Simplified Chinese are included; other languages use English.
 
-The **Schedex: Scheduled prompts** command also offers immediate send and retry actions.
+For integration problems, run **Schedex: UI diagnostics**. Report issues with your VS Code/Codex versions, OS, and reproduction steps in [GitHub Issues](https://github.com/stalin-777/schedex/issues), or contact [@bambucha762 on Telegram](https://t.me/bambucha762).
 
-## Privacy
+[Changelog](CHANGELOG.md) · [Development](docs/DEVELOPMENT.md) · [Manual publication](docs/PUBLISHING.md) · [MIT license](LICENSE)
 
-Schedex stores scheduled prompts and Codex thread IDs in VS Code extension storage on your machine. It does not add a separate cloud service. Sending is performed through the Codex runtime bundled with the official OpenAI extension.
+## ❤️ Support the Project
 
-## Troubleshooting
+If this extension saves you time and helps you code faster, consider supporting its further development! Every donation keeps the project alive and updated.
 
-If Schedex cannot determine the intended thread, use Codex **Copy deeplink** and run **Schedex: Use thread from Copy deeplink** once.
+💳 **Support via Lava.top** (Supports Visa/Mastercard/Apple Pay) -> [👉 Click here to Donate](https://app.lava.top/ithlete?tabId=donate)
 
-For UI integration problems, run **Schedex: UI diagnostics** to inspect the Codex view IDs and commands exposed by the installed Codex extension.
+**Crypto Donation (Direct to Bybit)**
+If you prefer crypto, you can send tips directly to these wallets:
 
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-## Support
-
-Report bugs and request features in [GitHub Issues](https://github.com/stalin-777/schedex/issues). Include the VS Code and Codex extension versions, your operating system, and steps to reproduce the issue.
-
-You can also contact the author on Telegram: [@bambucha762](https://t.me/bambucha762).
-
-## Repository documentation
-
-- [Development, debugging, and CI](docs/DEVELOPMENT.md)
-- [Manual packaging and publication](docs/PUBLISHING.md)
+| Asset | Network | Wallet Address |
+| :--- | :--- | :--- |
+| **USDT** | `TRC-20` | `TFu4UR1sA9AyYyDBaSQQ1iRKZyT1NaX3mL` |

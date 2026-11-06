@@ -10,6 +10,10 @@ The release version is set in `package.json` and `package-lock.json`. For later 
 npm version patch --no-git-tag-version
 ```
 
+Update the root [CHANGELOG.md](../CHANGELOG.md) for that version before packaging. Keep the newest version first and retain older entries. While changes are in development, use an `(Unreleased)` heading; when publishing, replace it with the actual release date, for example `## 1.1.0 - YYYY-MM-DD`. Describe the final user-visible behavior, including any restrictions.
+
+`vsce` automatically includes this file in the VSIX and registers it as the extension's changelog. No `package.json` field is needed.
+
 Run `make verify` to check the project and build `schedex.vsix`. Without Make, run the [equivalent npm commands](DEVELOPMENT.md#commands). You can also download a VSIX built from the same commit from GitHub Actions.
 
 Install the resulting file using VS Code's **Extensions → … → Install from VSIX…** command. Test it with the current official Codex extension: send to an existing conversation, create a new conversation, and edit or remove a scheduled task.
