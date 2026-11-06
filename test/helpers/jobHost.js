@@ -77,13 +77,24 @@ function createJobHost(storagePath, { runtime = {}, delivery, io = fileSystem, l
   jobs.initialize(context, onChange);
   const upsert = jobs.upsertJob;
   jobs.upsertJob = (job) => upsert(bind(job));
-  return { jobs, store: load('jobStore'), locks: load('jobLocks'), availability: load('availability'), notifications };
+  const describe = (extra) => {
+    const snapshot = jobs.getSnapshot();
+    const state = ({ id, status, waitReason, attempts, lastError }) => ({ id, status, waitReason, attempts, lastError });
+    return { active: snapshot.jobs.map(state), history: snapshot.history.map(state), notifications, ...extra?.() };
+  };
+  return { jobs, store: load('jobStore'), locks: load('jobLocks'), availability: load('availability'), notifications,
+    waitFor: (predicate, timeout, extra) => until(predicate, timeout, () => describe(extra)) };
 }
 
-async function until(predicate, timeout = 5000) {
+// Atomic writes include fsync and file locks; shared CI disks can take several
+// seconds after queue acceptance to finish persisting the history record.
+async function until(predicate, timeout = 15000, describe) {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error('Timed out waiting for job state');
+    if (Date.now() > deadline) {
+      const details = describe ? `: ${JSON.stringify(describe())}` : '';
+      throw new Error('Timed out waiting for job state' + details);
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }

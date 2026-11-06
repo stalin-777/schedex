@@ -21,7 +21,8 @@ test('legacy existing-thread overrides pause before touching Codex and can be ed
       model: 'large', reasoningEffort: 'xhigh', prompt: 'Continue', status: 'scheduled', attempts: 0,
       sendAt: Date.now(), nextCheckAt: Date.now(), expiresAt: Date.now() + 86400000 };
     await host.jobs.upsertJob(job); host.jobs.scheduleTimer(job);
-    await until(() => host.jobs.getJobs().find((item) => item.id === job.id)?.status === 'paused');
+    await host.waitFor(() => host.jobs.getJobs().find((item) => item.id === job.id)?.status === 'paused', undefined,
+      () => ({ expectedJob: job.id, opened, queued }));
     const paused = host.jobs.getJobs().find((item) => item.id === job.id);
     assert.equal(paused.waitReason, 'threadSettings');
     assert.equal(paused.model, 'large');
@@ -30,7 +31,8 @@ test('legacy existing-thread overrides pause before touching Codex and can be ed
   assert.equal(opened, 0);
   const edited = await host.jobs.updateEditableJob('legacy-time', { model: null, reasoningEffort: null, sendAt: Date.now() });
   host.jobs.scheduleTimer(edited);
-  await until(() => !host.jobs.getJobs().some((job) => job.id === edited.id));
+  await host.waitFor(() => host.jobs.getHistory().some((job) => job.id === edited.id && job.status === 'queued'), undefined,
+    () => ({ expectedJob: edited.id, opened, queued }));
   assert.equal(queued, 1);
 });
 

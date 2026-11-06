@@ -16,7 +16,7 @@ const fakeClient = { request: async () => ACCOUNT };
 const ready = () => ({ ordinaryUsageAllowed: true, rateLimits: { primary: { usedPercent: 10, windowDurationMins: 300 } } });
 
 async function fixture(t, { read = async () => ({ accountKey: KEY, limits: ready() }), deliver, context,
-  beforeAccount = ACCOUNT, targetModel = 'model', legacy = [], queue } = {}) {
+  beforeAccount = ACCOUNT, targetModel = 'model', legacy = [], queue, io } = {}) {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-availability-'));
   let reads = 0;
   let sends = 0;
@@ -38,7 +38,7 @@ async function fixture(t, { read = async () => ({ accountKey: KEY, limits: ready
       await onStarted('turn-' + sends);
     }, dispose() {}
   };
-  const host = createJobHost(folder, { runtime, delivery, legacy });
+  const host = createJobHost(folder, { runtime, delivery, legacy, io });
   t.after(async () => {
     for (const job of host.jobs.getJobs()) {
       const release = await host.locks.acquireFileLock('job:' + job.id, 1000);
@@ -47,7 +47,8 @@ async function fixture(t, { read = async () => ({ accountKey: KEY, limits: ready
     host.jobs.dispose();
     await fs.rm(folder, { recursive: true, force: true });
   });
-  return { ...host, runtime, delivery, folder, queued, counts: () => ({ reads, sends }) };
+  return { ...host, runtime, delivery, folder, queued, counts: () => ({ reads, sends }),
+    waitFor: (predicate, timeout) => host.waitFor(predicate, timeout, () => ({ reads, sends })) };
 }
 
 function task(id = 'available') {
@@ -109,13 +110,60 @@ test('available tasks with conversation defaults use the owning Codex server que
   const host = await fixture(t, { deliver: async () => { throw new Error('must not open a separate writer'); } });
   const job = { ...task('open-thread'), threadMode: 'existing', model: null };
   await host.jobs.upsertJob(job); host.jobs.scheduleTimer(job);
-  await until(() => host.jobs.getJobs().length === 0);
+  await host.waitFor(() => host.jobs.getHistory().some((item) => item.id === job.id && item.status === 'queued'));
   assert.equal(host.queued[0].threadId, 'thread');
   assert.equal(host.queued[0].prompt, 'Continue');
   assert.deepEqual(host.counts(), { reads: 1, sends: 1 });
   // Acceptance invalidates the shared quota snapshot for the next task.
   await host.availability.check(RUNTIME, job);
   assert.equal(host.counts().reads, 2);
+});
+
+test('queue delivery tolerates slow persistence after acceptance without submitting again', async (t) => {
+  let block = false;
+  let held = false;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const io = {
+    ...fs,
+    open: async (...args) => {
+      const handle = await fs.open(...args);
+      if (!String(args[0]).endsWith('.tmp')) return handle;
+      return { writeFile: (...values) => handle.writeFile(...values), close: () => handle.close(),
+        sync: async () => {
+          await handle.sync();
+          if (block && path.basename(args[0]).startsWith('availability.v1.json.')) {
+            block = false; held = true;
+            await gate;
+          }
+        } };
+    }
+  };
+  const host = await fixture(t, { io, queue: async () => { block = true; return { id: 'queue-1' }; } });
+  const job = { ...task('slow-history'), threadMode: 'existing', model: null };
+  await host.jobs.upsertJob(job); host.jobs.scheduleTimer(job);
+  const archived = () => host.jobs.getHistory().some((item) => item.id === job.id && item.status === 'queued');
+  let settled = false;
+  const waiting = host.waitFor(archived).then(() => { settled = true; return null; }, (error) => { settled = true; return error; });
+  const actualNow = Date.now;
+  try {
+    await host.waitFor(() => held);
+    // Simulate six seconds in the post-send fsync without slowing down the suite.
+    Date.now = () => actualNow() + 6000;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(settled, false, 'a successful send must have enough time to persist its receipt');
+    release();
+    assert.equal(await waiting, null);
+    assert.deepEqual(host.counts(), { reads: 1, sends: 1 });
+    assert.equal(host.jobs.getJobs().length, 0);
+    assert.equal(host.jobs.getHistory()[0].queuedSubmissionId, 'queue-1');
+    await assert.rejects(host.waitFor(() => false, 0), /"status":"queued".*"reads":1,"sends":1/);
+  } finally {
+    Date.now = actualNow;
+    release();
+    await waiting;
+    await host.waitFor(archived);
+  }
 });
 
 test('queue delivery rechecks the account before submitting', async (t) => {
