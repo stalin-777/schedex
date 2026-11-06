@@ -16,7 +16,7 @@ test('webview loads packaged styles and scripts under a restrictive CSP', () => 
   const webview = { cspSource: 'vscode-resource:', asWebviewUri: (uri) => uri };
   const html = schedulerHtml(webview, '/extension');
   assert.match(html, /media\/scheduler\.css/);
-  for (const file of ['threadPicker.js', 'dateTimeFields.js', 'jobList.js', 'scheduler.js']) {
+  for (const file of ['threadPicker.js', 'dateTimeFields.js', 'modelPicker.js', 'jobList.js', 'scheduler.js']) {
     assert.match(html, new RegExp(`media/${file.replace('.', '\\.')}"`));
   }
   assert.match(html, /class="date-time-grid"/);
@@ -24,7 +24,7 @@ test('webview loads packaged styles and scripts under a restrictive CSP', () => 
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.equal((html.match(/role="spinbutton"/g) || []).length, 2);
-  assert.doesNotMatch(html, /<select/);
+  assert.doesNotMatch(html, /<select[^>]+id="(?:hour|minute)"/);
   assert.match(html, /default-src 'none'/);
   assert.doesNotMatch(html, /unsafe-inline|<style>|<script nonce=/);
   assert.match(html, /id="i18n" type="application\/json"/);

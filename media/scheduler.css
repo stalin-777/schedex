@@ -15,6 +15,7 @@
   .error { margin-top: 12px; color: var(--vscode-errorForeground); min-height: 18px; font-size: 12px; }
   .success { margin-top: 12px; color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); min-height: 18px; font-size: 12px; }
   .date-time-grid { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(220px, 230px); gap: 16px; align-items: start; }
+  .model-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
   .time-wrap { display: flex; gap: 6px; align-items: center; }
   .stepper { display: flex; min-width: 0; height: 36px; }
   .stepper input { width: 38px; min-width: 0; padding: 6px 0; text-align: center; border-radius: 0; font-variant-numeric: tabular-nums; }
@@ -38,13 +39,18 @@
   .job-card:last-child { border-bottom: 0; }
   .job-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
   .job-time { font-weight: 600; font-variant-numeric: tabular-nums; }
-  .job-status { font-size: 12px; color: var(--vscode-descriptionForeground); }
-  .job-thread, .job-prompt, .job-error { margin-top: 4px; overflow-wrap: anywhere; font-size: 12px; }
-  .job-thread { color: var(--vscode-descriptionForeground); }
+  .job-status { font-size: 12px; font-weight: 600; color: var(--vscode-descriptionForeground); }
+  .job-status[data-status="completed"] { color: var(--vscode-testing-iconPassed, var(--vscode-terminal-ansiGreen, #388a34)); }
+  .job-status:is([data-status="failed"], [data-status="interrupted"], [data-status="expired"]) { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, #f14c4c)); }
+  .job-status:is([data-status="checking"], [data-status="sending"], [data-status="running"], [data-status="queued"], [data-status="paused"], [data-status="review"], [data-status="confirmation"]) { color: var(--vscode-editorWarning-foreground, var(--vscode-terminal-ansiYellow, #b89500)); }
+  .job-thread, .job-model, .job-prompt, .job-error, .job-waiting { margin-top: 4px; overflow-wrap: anywhere; font-size: 12px; }
+  .job-thread, .job-model, .job-waiting { color: var(--vscode-descriptionForeground); }
   .job-prompt { white-space: pre-wrap; max-height: 4em; overflow: hidden; }
   .job-error { color: var(--vscode-errorForeground); }
-  .job-actions { display: flex; gap: 8px; margin-top: 9px; }
-  .job-actions button { padding: 5px 9px; }
+  .job-actions, .template-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+  .job-actions button, .template-actions button { padding: 5px 9px; }
+  .job-thread-id { font-family: var(--vscode-editor-font-family); font-size: 11px; opacity: 0.7; overflow-wrap: anywhere; margin-top: 3px; }
+  .template-actions { margin-bottom: 14px; }
   .combo { position: relative; }
   .combo-input { padding-right: 34px; }
   .combo-toggle { position: absolute; right: 1px; top: 1px; height: calc(100% - 2px); width: 32px; padding: 0; color: var(--vscode-input-foreground); background: transparent; }
@@ -61,4 +67,4 @@
   .selected-name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .selected-id { font: 11px var(--vscode-editor-font-family); color: var(--vscode-descriptionForeground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .empty { padding: 12px; color: var(--vscode-descriptionForeground); }
-  @media (max-width: 480px) { .date-time-grid { grid-template-columns: 1fr; } .reset-row { justify-content: flex-start; } }
+  @media (max-width: 480px) { .date-time-grid, .model-grid { grid-template-columns: 1fr; } .reset-row { justify-content: flex-start; } }

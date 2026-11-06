@@ -7,6 +7,7 @@ window.SchedexComponents.createThreadPicker = function(T, onChange) {
   const selectedWrap = document.getElementById('selectedWrap');
   const selectedName = document.getElementById('selectedName');
   const selectedId = document.getElementById('selectedId');
+  const selectionNote = document.getElementById('threadSelectionNote');
   const existingMode = document.getElementById('existingMode');
   const newMode = document.getElementById('newMode');
   const existingThreadFields = document.getElementById('existingThreadFields');
@@ -29,7 +30,10 @@ window.SchedexComponents.createThreadPicker = function(T, onChange) {
   }
 
   function chooseThread(thread, userInitiated = false) {
-    if (userInitiated) userHasChangedSelection = true;
+    if (userInitiated) {
+      userHasChangedSelection = true;
+      selectionNote.textContent = '';
+    }
     selectedThread = thread || null;
     if (thread) {
       search.value = thread.name || thread.id;
@@ -99,17 +103,20 @@ window.SchedexComponents.createThreadPicker = function(T, onChange) {
     onChange();
   }
 
-  function setThreads(list, selectedThreadId) {
+  function setThreads(list, selectedThreadId, note) {
+    const wasOpen = results.classList.contains('open');
     threads = Array.isArray(list) ? list.slice() : [];
+    if (note !== undefined && !userHasChangedSelection) selectionNote.textContent = note;
     if (userHasChangedSelection) {
       if (selectedThread) {
         const refreshed = threads.find((thread) => thread.id === selectedThread.id);
         if (refreshed) chooseThread(refreshed);
         else threads.unshift(selectedThread);
       }
-      return;
+    } else {
+      chooseThread(threads.find((thread) => thread.id === selectedThreadId) || null);
     }
-    chooseThread(threads.find((thread) => thread.id === selectedThreadId) || threads[0] || null);
+    if (wasOpen) renderResults();
   }
 
   function selectForJob(job) {
@@ -163,6 +170,7 @@ window.SchedexComponents.createThreadPicker = function(T, onChange) {
   return {
     setThreads,
     selectForJob,
+    selectCurrentThread: (threadId) => selectForJob({ threadId }),
     getSelectedThread: () => selectedThread,
     getMode: () => newMode.checked ? 'new' : 'existing'
   };

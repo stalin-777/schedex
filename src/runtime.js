@@ -5,87 +5,136 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const cp = require('child_process');
-const readline = require('readline');
-const { version } = require('../package.json');
+const crypto = require('crypto');
+const { connectAppServer } = require('./appServerClient');
+const { readModels, validateModelSettings } = require('./models');
+const { accountKey } = require('./accountIdentity');
+const { resetSuggestion } = require('./availabilityPolicy');
+const { readThreadRevision } = require('./threadRevision');
+const { readTaskProgress } = require('./taskProgress');
+const { MAX_OUTPUT_BYTES, MAX_STORE_BYTES, validatePrompt } = require('./limits');
+
+async function withAppServer(runtime, callback) {
+  const client = await connectAppServer(runtime);
+  try { return await callback(client); }
+  finally { client.close(); }
+}
+
+function getTaskProgress(runtime, job) {
+  return withAppServer(runtime, (client) => readTaskProgress(client.request, job));
+}
+
+function getAccountKey(runtime) {
+  return withAppServer(runtime, async (client) => accountKey(await client.request('account/read', {})));
+}
+
+function queuePrompt(runtime, job, beforeSubmit) {
+  validatePrompt(job.prompt);
+  return withAppServer(runtime, async (client) => {
+    const model = job.sendMode === 'available'
+      ? (await client.request('thread/read', { threadId: job.threadId, includeTurns: false })).thread?.model : null;
+    await beforeSubmit(client, { model });
+    let result;
+    try {
+      result = await client.request('thread/queue/add', {
+        threadId: job.threadId, clientUserMessageId: job.clientMessageId || crypto.randomUUID(),
+        input: [{ type: 'text', text: job.prompt, text_elements: [] }]
+      });
+    } catch (error) {
+      if (error.rpcError && ([-32600, -32601, -32602].includes(error.code)
+        || /no rollout found|rate.?limit|429/i.test(error.message))) error.submissionRejected = true;
+      else error.submissionAttempted = true;
+      throw error;
+    }
+    if (!result?.queuedSubmission?.id) {
+      throw Object.assign(new Error('Codex did not return a queue receipt'), { submissionAttempted: true });
+    }
+    return result.queuedSubmission;
+  });
+}
+
+function readHistoryProgress(runtime, jobs, isStopped = () => false) {
+  return withAppServer(runtime, async (client) => {
+    const cache = new Map();
+    let bytes = 0;
+    const request = async (method, params) => {
+      const key = JSON.stringify([method, params]);
+      if (cache.has(key)) return cache.get(key).value;
+      const value = await client.request(method, params);
+      const size = Buffer.byteLength(JSON.stringify(value));
+      if (size <= MAX_STORE_BYTES) {
+        while (bytes + size > MAX_STORE_BYTES && cache.size) {
+          const oldest = cache.keys().next().value;
+          bytes -= cache.get(oldest).size;
+          cache.delete(oldest);
+        }
+        cache.set(key, { value, size }); bytes += size;
+      }
+      return value;
+    };
+    const updates = [];
+    for (const job of jobs) {
+      if (isStopped()) break;
+      let changes;
+      try { changes = { ...await readTaskProgress(request, job), statusError: null }; }
+      catch (error) { changes = { statusError: String(error.message || error).slice(0, 2000) }; }
+      updates.push({ id: job.id, changes: { ...changes, lastStatusCheckAt: Date.now() } });
+    }
+    return updates;
+  });
+}
+
+function getThreadRevision(runtime, threadId) {
+  return withAppServer(runtime, (client) => readThreadRevision(client.request, threadId));
+}
 
 async function getRateLimitSuggestion(runtime) {
   const result = await appServerRequest(runtime, 'account/rateLimits/read', undefined, 12000);
-  const candidates = [];
-  function add(snapshot) {
-    if (!snapshot || typeof snapshot !== 'object') return;
-    for (const key of ['primary', 'secondary']) {
-      const bucket = snapshot[key];
-      if (!bucket || typeof bucket !== 'object') continue;
-      const resetsAt = Number(bucket.resetsAt);
-      const duration = Number(bucket.windowDurationMins);
-      const usedPercent = Number(bucket.usedPercent);
-      if (!Number.isFinite(resetsAt) || resetsAt <= Date.now() / 1000 - 60) continue;
-      candidates.push({ resetsAt, duration, usedPercent, reached: Boolean(snapshot.rateLimitReachedType) });
+  return resetSuggestion(result);
+}
+
+function getAvailabilityContext(runtime, job) {
+  return withAppServer(runtime, async (client) => {
+    const key = accountKey(await client.request('account/read', {}));
+    let model = job.model;
+    if (model) {
+      const invalid = validateModelSettings(await readModels(client.request), model, job.reasoningEffort);
+      if (invalid) throw Object.assign(new Error(invalid), { code: invalid === 'invalidModel' ? 'MODEL_UNAVAILABLE' : 'INVALID_EFFORT' });
     }
-  }
-  add(result?.rateLimits);
-  if (result?.rateLimitsByLimitId && typeof result.rateLimitsByLimitId === 'object') {
-    for (const snapshot of Object.values(result.rateLimitsByLimitId)) add(snapshot);
-  }
-  const fiveHour = candidates.filter((c) => c.duration === 300);
-  if (!fiveHour.length) return null;
-  fiveHour.sort((a, b) => {
-    const scoreA = (a.reached ? 1000 : 0) + ((a.usedPercent || 0) >= 99 ? 500 : 0) + (a.usedPercent || 0);
-    const scoreB = (b.reached ? 1000 : 0) + ((b.usedPercent || 0) >= 99 ? 500 : 0) + (b.usedPercent || 0);
-    return scoreB - scoreA || a.resetsAt - b.resetsAt;
-  });
-  const resetAtMs = fiveHour[0].resetsAt * 1000;
-  return { resetAtMs, sendAtMs: resetAtMs + 60 * 1000 };
-}
-
-async function appServerRequest(runtime, method, params, timeoutMs = 12000) {
-  return new Promise((resolve, reject) => {
-    const args = [...runtime.baseArgs, 'app-server', '--listen', 'stdio://'];
-    const child = cp.spawn(runtime.command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-    const rl = readline.createInterface({ input: child.stdout });
-    let stderr = '';
-    let finished = false;
-    const timer = setTimeout(() => finishReject(new Error(`app-server timeout (${method})`)), timeoutMs);
-
-    child.stderr.on('data', (d) => { stderr += String(d); });
-    child.stdin.on('error', finishReject);
-    child.on('error', finishReject);
-    child.on('close', (code) => {
-      if (!finished) finishReject(new Error(stderr.trim() || `app-server exited with ${code}`));
-    });
-    rl.on('line', (line) => {
-      let msg;
-      try { msg = JSON.parse(line); } catch (_) { return; }
-      if (msg.id === 1) {
-        if (msg.error) return finishReject(new Error(JSON.stringify(msg.error)));
-        send({ method: 'initialized' });
-        const request = { method, id: 2 };
-        if (params !== undefined) request.params = params;
-        send(request);
-      } else if (msg.id === 2) {
-        if (msg.error) return finishReject(new Error(msg.error.message || JSON.stringify(msg.error)));
-        finishResolve(msg.result);
+    if (!model && job.threadId) {
+      try { model = (await client.request('thread/read', { threadId: job.threadId })).thread?.model; }
+      catch (error) {
+        // A new thread created before a rejected first turn may have no rollout yet.
+        // Read defaults so preparation can replace that provisional ID on this attempt.
+        if (job.threadMode !== 'new' || job.threadInitialized !== false || !/no rollout found/i.test(error.message)) throw error;
       }
-    });
-
-    function send(obj) { if (!child.stdin.destroyed) child.stdin.write(JSON.stringify(obj) + '\n'); }
-    function cleanup() { clearTimeout(timer); rl.close(); try { child.stdin.end(); } catch (_) {} try { child.kill(); } catch (_) {} }
-    function finishResolve(value) { if (finished) return; finished = true; cleanup(); resolve(value); }
-    function finishReject(err) { if (finished) return; finished = true; cleanup(); reject(err); }
-
-    send({ method: 'initialize', id: 1, params: { clientInfo: { name: 'schedex', title: 'Schedex', version } } });
+    }
+    if (!model) model = (await client.request('config/read', { includeLayers: false, ...(job.cwd ? { cwd: job.cwd } : {}) })).config?.model;
+    if (!model) model = (await readModels(client.request)).find((item) => item.isDefault)?.id;
+    return { accountKey: key, model: model || null };
   });
 }
 
-async function createCodexThread(runtime, cwd = getWorkspaceCwdForCodex()) {
-  const params = { threadSource: 'vscode', serviceName: 'schedex' };
-  if (cwd) params.cwd = cwd;
-  const result = await appServerRequest(runtime, 'thread/start', params, 12000);
-  const id = result?.thread?.id;
-  if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
-    throw new Error('Codex did not return a valid thread ID');
-  }
-  return id.toLowerCase();
+function readAvailabilitySnapshot(runtime) {
+  return withAppServer(runtime, async (client) => {
+    const before = await client.request('account/read', {});
+    const key = accountKey(before);
+    const limits = await client.request('account/rateLimits/read');
+    const after = accountKey(await client.request('account/read', {}));
+    if (key !== after || (limits.accountId && before.workspaceRouting?.chatgptAccountId
+      && limits.accountId !== before.workspaceRouting.chatgptAccountId)) {
+      throw Object.assign(new Error('Account changed'), { code: 'ACCOUNT_CHANGED' });
+    }
+    return { accountKey: key, limits };
+  });
+}
+
+function appServerRequest(runtime, method, params, timeoutMs = 12000) {
+  return withAppServer(runtime, (client) => client.request(method, params, timeoutMs));
+}
+
+function getAvailableModels(runtime) {
+  return withAppServer(runtime, (client) => readModels(client.request));
 }
 
 async function resolveCodexRuntime() {
@@ -162,25 +211,12 @@ function getWslInfo() {
 
 function toWslPath(winPath, distro) {
   return new Promise((resolve, reject) => {
-    cp.execFile('wsl.exe', ['-d', distro, '--', 'wslpath', '-u', winPath], { windowsHide: true }, (err, stdout, stderr) => {
+    cp.execFile('wsl.exe', ['-d', distro, '--', 'wslpath', '-u', winPath], { windowsHide: true, maxBuffer: MAX_OUTPUT_BYTES }, (err, stdout, stderr) => {
       if (err) return reject(new Error(stderr || err.message));
       const value = String(stdout).trim();
       if (!value) return reject(new Error('wslpath returned empty path'));
       resolve(value);
     });
-  });
-}
-
-function runCodex(runtime, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const child = cp.spawn(runtime.command, [...runtime.baseArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => { try { child.kill(); } catch (_) {} reject(new Error('codex command timeout')); }, timeoutMs);
-    child.stdout.on('data', (d) => { stdout += String(d); });
-    child.stderr.on('data', (d) => { stderr += String(d); });
-    child.on('error', (err) => { clearTimeout(timer); reject(err); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
   });
 }
 
@@ -192,4 +228,5 @@ function getWorkspaceCwdForCodex() {
 }
 
 
-module.exports = { getRateLimitSuggestion, appServerRequest, createCodexThread, resolveCodexRuntime, runCodex, getWorkspaceCwdForCodex };
+module.exports = { withAppServer, getRateLimitSuggestion, appServerRequest, getAvailableModels, getAvailabilityContext, getThreadRevision, getTaskProgress,
+  getAccountKey, queuePrompt, readHistoryProgress, readAvailabilitySnapshot, resolveCodexRuntime, getWorkspaceCwdForCodex };

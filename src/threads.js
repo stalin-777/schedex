@@ -3,7 +3,7 @@
 const vscode = require('vscode');
 const { s } = require('./i18n');
 const { normalizeWhitespace, truncate, sleep } = require('./utils');
-const { appServerRequest } = require('./runtime');
+const { appServerRequest, withAppServer, resolveCodexRuntime } = require('./runtime');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_ANY_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
@@ -15,11 +15,11 @@ const MAX_THREAD_PAGES = 10;
 let extContext;
 function initialize(context) { extContext = context; }
 
-async function resolveCurrentThreadIdNonInteractive(invocationArgs) {
+async function resolveCurrentThreadIdNonInteractive(invocationArgs = []) {
   const fromArgs = extractUuidDeep(invocationArgs);
   if (fromArgs) return fromArgs;
 
-  const fromActiveTab = getThreadIdFromActiveTab();
+  const fromActiveTab = isSidebarInvocation(invocationArgs) ? null : getThreadIdFromActiveTab();
   if (fromActiveTab) return fromActiveTab;
 
   const fromExports = await probeCodexExtensionExports();
@@ -28,16 +28,19 @@ async function resolveCurrentThreadIdNonInteractive(invocationArgs) {
   const fromHiddenCopy = await probeHiddenCopyThreadCommand();
   if (fromHiddenCopy) return fromHiddenCopy;
 
-  try {
-    const clipboard = await vscode.env.clipboard.readText();
-    const fromClipboard = extractThreadId(clipboard);
-    if (fromClipboard) return fromClipboard;
-  } catch (_) {}
-
   return getRememberedThreadBinding();
 }
 
-async function listRecentThreads(runtime) {
+function isSidebarInvocation(args) {
+  return args.some((arg) => arg && typeof arg === 'object'
+    && /chatgpt|codex/i.test(String(arg.viewId || arg.webviewId || '')));
+}
+
+function listRecentThreads(runtime, onPage = () => {}) {
+  return withAppServer(runtime, (client) => readRecentThreads(client.request, onPage));
+}
+
+async function readRecentThreads(request, onPage) {
   const base = {
     limit: THREAD_PAGE_SIZE,
     sortKey: 'recency_at',
@@ -51,31 +54,34 @@ async function listRecentThreads(runtime) {
   for (let page = 0; page < MAX_THREAD_PAGES; page++) {
     let result;
     try {
-      result = await appServerRequest(runtime, 'thread/list', { ...base, cursor }, 12000);
+      result = await request('thread/list', { ...base, cursor }, 12000);
     } catch (error) {
       if (!items.length) throw error;
       break;
     }
     if (!Array.isArray(result?.data)) break;
-    items.push(...result.data);
+    items.push(...result.data.map(threadListItem).filter(Boolean));
+    await onPage(items.slice());
     const nextCursor = result.nextCursor;
     if (!nextCursor || seenCursors.has(nextCursor)) break;
     seenCursors.add(nextCursor);
     cursor = nextCursor;
   }
-  return items.map((thread) => {
-    const id = extractThreadId(thread?.id);
-    if (!id) return null;
-    const preview = normalizeWhitespace(thread?.preview || '');
-    const name = normalizeWhitespace(thread?.name || '') || truncate(preview, 72) || s('unnamed');
-    const updatedAt = Number(thread?.updatedAt);
-    return {
-      id,
-      name,
-      preview: preview && preview !== name ? truncate(preview, 180) : '',
-      updatedAt: Number.isFinite(updatedAt) ? updatedAt * 1000 : null
-    };
-  }).filter(Boolean);
+  return items;
+}
+
+function threadListItem(thread) {
+  const id = extractThreadId(thread?.id);
+  if (!id) return null;
+  const preview = normalizeWhitespace(thread?.preview || '');
+  const name = normalizeWhitespace(thread?.name || '') || truncate(preview, 72) || s('unnamed');
+  const updatedAt = Number(thread?.updatedAt);
+  return {
+    id,
+    name,
+    preview: preview && preview !== name ? truncate(preview, 180) : '',
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt * 1000 : null
+  };
 }
 
 
@@ -127,16 +133,13 @@ async function probeHiddenCopyThreadCommand() {
     original = await vscode.env.clipboard.readText();
     for (const command of candidates) {
       try {
+        // Empty the probe first so copying the same link is distinguishable from a no-op.
+        await vscode.env.clipboard.writeText('');
         await vscode.commands.executeCommand(command);
         await sleep(40);
         const id = extractThreadId(await vscode.env.clipboard.readText());
         if (id) return id;
       } catch (_) {}
-      finally {
-        if (original !== undefined) {
-          try { await vscode.env.clipboard.writeText(original); } catch (_) {}
-        }
-      }
     }
   } catch (_) {}
   finally {
@@ -209,5 +212,34 @@ function getRememberedThreadBinding() {
   return binding?.explicit ? extractThreadId(binding.threadId || '') : null;
 }
 
+async function openThread(threadId) {
+  const id = extractThreadId(threadId);
+  if (!id) throw new Error(s('invalidThread'));
+  const scheme = vscode.env.uriScheme || 'vscode';
+  return vscode.env.openExternal(vscode.Uri.parse(`${scheme}://openai.chatgpt/local/${id}`));
+}
 
-module.exports = { initialize, resolveCurrentThreadIdNonInteractive, listRecentThreads, bindThreadFromClipboard, extractThreadId, rememberThreadBinding, getRememberedThreadBinding };
+async function openJobThread(job) {
+  if (!job?.threadId) throw new Error(s('invalidThread'));
+  if (job.threadMode === 'new') {
+    if (job.threadInitialized === false || ['checking', 'sending'].includes(job.status)) {
+      vscode.window.showInformationMessage(s(job.turnId ? 'newThreadRunning' : 'newThreadPending'));
+      return;
+    }
+    const runtime = await resolveCodexRuntime();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await appServerRequest(runtime, 'thread/read', { threadId: job.threadId, includeTurns: false }, 3000);
+        break;
+      } catch (error) {
+        if (!/no rollout found|failed to resolve rollout path .*file does not exist/i.test(error.message)) throw error;
+        if (attempt === 3) throw new Error(s('threadNotReady'), { cause: error });
+        await sleep(250 * 2 ** attempt);
+      }
+    }
+  }
+  return openThread(job.threadId);
+}
+
+
+module.exports = { initialize, resolveCurrentThreadIdNonInteractive, listRecentThreads, bindThreadFromClipboard, extractThreadId, rememberThreadBinding, getRememberedThreadBinding, openThread, openJobThread };

@@ -47,3 +47,80 @@ test('legacy tasks migrate once and a corrupt file is never overwritten with cac
   await assert.rejects(host.jobs.upsertJob({ id: 'lost', status: 'failed' }), SyntaxError);
   assert.equal(await fs.readFile(filePath, 'utf8'), '{broken');
 });
+
+test('a permanent atomic replacement failure preserves the previous file and releases storage ownership', async (t) => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-rename-denied-'));
+  let deny = false;
+  const host = createJobHost(folder, { io: { ...fs, rename: async (...args) => {
+    if (deny) throw Object.assign(new Error('Replacement remains denied'), { code: 'EPERM' });
+    return fs.rename(...args);
+  } } });
+  t.after(async () => { host.jobs.dispose(); await fs.rm(folder, { recursive: true, force: true }); });
+  await host.jobs.upsertJob({ id: 'kept', status: 'paused' });
+  const before = await fs.readFile(host.store.getJobsFilePath(), 'utf8');
+  deny = true;
+  await assert.rejects(host.jobs.upsertJob({ id: 'unsaved', status: 'paused' }), { code: 'EPERM' });
+  assert.equal(await fs.readFile(host.store.getJobsFilePath(), 'utf8'), before);
+  assert.equal((await fs.readdir(folder)).some((name) => name.endsWith('.tmp')), false);
+  const release = await host.locks.acquireFileLock('jobs');
+  assert.equal(typeof release, 'function');
+  await release();
+});
+
+test('retrying an old new-thread rollout failure preserves proof that its ID was provisional', async (t) => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-rollout-retry-'));
+  const legacy = [
+    { id: 'empty', threadMode: 'new', threadId: 'unpersisted', status: 'failed',
+      lastError: 'thread/queue/add failed: no rollout found for thread id unpersisted' },
+    { id: 'accepted', threadMode: 'new', threadId: 'accepted', status: 'failed', threadInitialized: true,
+      turnId: 'turn-1', lastError: 'no rollout found for thread id accepted' },
+    { id: 'existing', threadMode: 'existing', threadId: 'existing', status: 'failed', lastError: 'no rollout found' }
+  ];
+  const host = createJobHost(folder, { legacy });
+  t.after(async () => { host.jobs.dispose(); await fs.rm(folder, { recursive: true, force: true }); });
+  const retried = await host.jobs.updateEditableJob('empty', { sendAt: Date.now() + 60000 });
+  assert.equal(retried.threadInitialized, false);
+  assert.equal(retried.lastError, null);
+  const changes = { sendAt: Date.now() + 60000 };
+  assert.equal((await host.jobs.updateEditableJob('accepted', changes)).threadInitialized, true);
+  assert.equal((await host.jobs.updateEditableJob('existing', changes)).threadInitialized, undefined);
+});
+
+test('a history batch writes once, preserves concurrent changes and never recreates removed rows', async (t) => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-history-batch-'));
+  let writes = 0;
+  const a = createJobHost(folder, { io: { ...fs, rename: async (...args) => { writes++; return fs.rename(...args); } } });
+  const b = createJobHost(folder);
+  t.after(async () => { a.jobs.dispose(); b.jobs.dispose(); await fs.rm(folder, { recursive: true, force: true }); });
+  for (const id of ['one', 'two', 'removed']) await a.jobs.upsertJob({ id, archivedAt: Date.now(), status: 'queued' });
+  await b.jobs.removeJob('removed');
+  await b.jobs.upsertJob({ id: 'concurrent', status: 'paused', prompt: 'Keep me' });
+  writes = 0;
+  await a.store.updateHistoryJobs(['one', 'two', 'removed'].map((id) => ({ id, changes: { status: 'completed', terminalStatusConfirmed: true } })));
+  assert.equal(writes, 1);
+  assert.equal(a.jobs.getHistory().length, 2);
+  assert.equal(a.jobs.getJobs()[0].prompt, 'Keep me');
+  assert.equal(a.jobs.getHistory().every((job) => job.status === 'completed'), true);
+});
+
+test('history pages are bounded and retention preserves active, running and unconfirmed work', async (t) => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-retention-'));
+  const host = createJobHost(folder);
+  t.after(async () => { host.jobs.dispose(); await fs.rm(folder, { recursive: true, force: true }); });
+  const old = Date.now() - 40 * 86400000;
+  await host.store.updateJobs((rows) => {
+    rows.push(...Array.from({ length: 60 }, (_, i) => ({ id: 'done-' + i, archivedAt: old + i, status: 'completed' })));
+    for (const status of ['queued', 'running', 'delivered', 'interrupted']) rows.push({ id: status, status, archivedAt: old });
+    rows.push({ id: 'pending', status: 'scheduled', sendAt: Date.now() + 600000 });
+  });
+  const page = host.store.getSnapshot(1);
+  assert.equal(page.history.length, 25);
+  assert.equal(page.historyTotal, 64);
+  assert.equal(page.jobs[0].id, 'pending');
+  assert.equal(host.store.getSnapshot(999).historyPage, 2);
+  await host.store.pruneHistory(0);
+  assert.equal(host.jobs.getHistory().length, 64);
+  await host.store.pruneHistory(30);
+  assert.deepEqual(host.jobs.getHistory().map((job) => job.id).sort(), ['delivered', 'interrupted', 'queued', 'running']);
+  assert.equal(host.jobs.getJobs()[0].id, 'pending');
+});

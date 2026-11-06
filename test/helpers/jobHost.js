@@ -4,9 +4,12 @@ const fs = require('node:fs');
 const fileSystem = require('node:fs/promises');
 const Module = require('node:module');
 const path = require('node:path');
+const { accountKey } = require('../../src/accountIdentity');
+const TEST_ACCOUNT = { account: { type: 'chatgpt', email: 'test@example.test' } };
+const TEST_ACCOUNT_KEY = accountKey(TEST_ACCOUNT);
 
 // Each host gets its own module state and Memento cache, just like a VS Code window.
-function createJobHost(storagePath, { runtime = {}, io = fileSystem, legacy = [], onChange = () => {} } = {}) {
+function createJobHost(storagePath, { runtime = {}, delivery, io = fileSystem, legacy = [], onChange = () => {}, bindAccount = true } = {}) {
   const modules = new Map();
   const notifications = [];
   const vscode = {
@@ -16,8 +19,29 @@ function createJobHost(storagePath, { runtime = {}, io = fileSystem, legacy = []
   };
   const codex = {
     resolveCodexRuntime: async () => ({}),
-    runCodex: async () => ({ code: 0 }),
+    getAccountKey: async () => TEST_ACCOUNT_KEY,
+    queuePrompt: async (_target, job) => ({ id: 'queue-1', clientUserMessageId: job.clientMessageId }),
+    readHistoryProgress: async (target, jobs, stopped) => {
+      const updates = [];
+      for (const job of jobs) {
+        if (stopped()) break;
+        let changes;
+        try { changes = { ...await runtime.getTaskProgress(target, job), statusError: null }; }
+        catch (error) { changes = { statusError: error.message }; }
+        updates.push({ id: job.id, changes: { ...changes, lastStatusCheckAt: Date.now() } });
+      }
+      return updates;
+    },
     ...runtime
+  };
+  // Keep submission checks in the harness; individual fakes only simulate the RPC result.
+  const queueWithChecks = codex.queuePrompt;
+  codex.queuePrompt = async (target, job, beforeSubmit) => {
+    const context = runtime.getAvailabilityContext ? await runtime.getAvailabilityContext(target, job) : { accountKey: TEST_ACCOUNT_KEY };
+    await beforeSubmit({ request: async () => runtime.readAccount ? runtime.readAccount()
+      : context.accountKey === TEST_ACCOUNT_KEY ? TEST_ACCOUNT
+        : { account: { type: 'chatgpt', email: 'changed@example.test' } } }, { model: context.model });
+    return queueWithChecks(target, job);
   };
 
   function load(name) {
@@ -30,16 +54,18 @@ function createJobHost(storagePath, { runtime = {}, io = fileSystem, legacy = []
     mod.require = function(request) {
       if (request === 'vscode') return vscode;
       if (request === './runtime') return codex;
-      if (request === './i18n') return { s: (key) => key };
+      if (request === './directDelivery' && delivery) return delivery;
+      if (request === './i18n') return { s: (key, params) => params?.error ? `${key}: ${params.error}` : key };
       if (request === 'fs/promises') return io;
-      if (['./jobStore', './jobLocks', './jobTimers'].includes(request)) return load(request.slice(2));
+      if (['./jobStore', './jobLocks', './jobTimers', './directDelivery', './availability'].includes(request)) return load(request.slice(2));
       return Module.prototype.require.call(this, request);
     };
     mod._compile(fs.readFileSync(filename, 'utf8'), filename);
     return mod.exports;
   }
 
-  const data = new Map([['schedex.jobs.v1', structuredClone(legacy)]]);
+  const bind = (job) => bindAccount ? { accountKey: TEST_ACCOUNT_KEY, ...job } : job;
+  const data = new Map([['schedex.jobs.v1', structuredClone(legacy.map(bind))]]);
   const context = {
     globalStorageUri: { fsPath: storagePath },
     globalState: {
@@ -49,13 +75,26 @@ function createJobHost(storagePath, { runtime = {}, io = fileSystem, legacy = []
   };
   const jobs = load('jobs');
   jobs.initialize(context, onChange);
-  return { jobs, store: load('jobStore'), locks: load('jobLocks'), notifications };
+  const upsert = jobs.upsertJob;
+  jobs.upsertJob = (job) => upsert(bind(job));
+  const describe = (extra) => {
+    const snapshot = jobs.getSnapshot();
+    const state = ({ id, status, waitReason, attempts, lastError }) => ({ id, status, waitReason, attempts, lastError });
+    return { active: snapshot.jobs.map(state), history: snapshot.history.map(state), notifications, ...extra?.() };
+  };
+  return { jobs, store: load('jobStore'), locks: load('jobLocks'), availability: load('availability'), notifications,
+    waitFor: (predicate, timeout, extra) => until(predicate, timeout, () => describe(extra)) };
 }
 
-async function until(predicate, timeout = 5000) {
+// Atomic writes include fsync and file locks; shared CI disks can take several
+// seconds after queue acceptance to finish persisting the history record.
+async function until(predicate, timeout = 15000, describe) {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error('Timed out waiting for job state');
+    if (Date.now() > deadline) {
+      const details = describe ? `: ${JSON.stringify(describe())}` : '';
+      throw new Error('Timed out waiting for job state' + details);
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }

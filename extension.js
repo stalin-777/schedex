@@ -9,6 +9,7 @@ const { manageScheduled } = require('./src/manage');
 const { diagnoseUi } = require('./src/diagnostics');
 
 let statusBar;
+let retentionTimer;
 
 async function activate(context) {
   initializeThreads(context);
@@ -25,11 +26,22 @@ async function activate(context) {
   );
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 75);
   context.subscriptions.push(statusBar);
+  const prune = () => jobs.pruneHistory(vscode.workspace?.getConfiguration?.('schedex')?.get('historyRetentionDays', 0) || 0);
+  await prune();
+  clearInterval(retentionTimer);
+  retentionTimer = setInterval(() => prune().catch((error) => console.error('Schedex history retention:', error)), 86400000);
+  retentionTimer.unref();
+  context.subscriptions.push({ dispose: () => clearInterval(retentionTimer) });
+  const settings = vscode.workspace?.onDidChangeConfiguration?.((event) => {
+    if (event.affectsConfiguration('schedex.historyRetentionDays')) prune().then(scheduler.publishJobs).catch(console.error);
+  });
+  if (settings) context.subscriptions.push(settings);
   await jobs.restoreTimers();
   updateStatusBar();
 }
 
 function deactivate() {
+  clearInterval(retentionTimer);
   jobs.dispose();
   scheduler.dispose();
 }
@@ -37,8 +49,8 @@ function deactivate() {
 function updateStatusBar() {
   if (!statusBar) return;
   const currentJobs = jobs.getJobs();
-  const scheduled = currentJobs.filter((j) => j.status === 'scheduled' || j.status === 'sending').length;
-  const failed = currentJobs.filter((j) => j.status === 'failed').length;
+  const scheduled = currentJobs.filter((j) => ['scheduled', 'checking', 'sending'].includes(j.status)).length;
+  const failed = currentJobs.filter((j) => ['failed', 'paused', 'expired', 'review', 'confirmation'].includes(j.status)).length;
   if (!scheduled && !failed) {
     statusBar.text = '$(schedex-schedule-send) Schedex';
     statusBar.tooltip = s('statusIdle');
