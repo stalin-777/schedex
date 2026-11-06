@@ -191,12 +191,25 @@ async function executeJob(jobId) {
     const updated = await handleSendFailure(job, err);
     if (updated?.status === 'confirmation') confirmation = updated;
   } finally {
-    if (releaseAvailability) await releaseAvailability();
-    if (releaseThread) await releaseThread();
-    if (releaseExecutionLock) await releaseExecutionLock();
-    inFlight.delete(jobId);
-    if (confirmation) requestStaleConfirmation(confirmation).catch((error) => console.error('Schedex confirmation:', error));
+    try {
+      await releaseLocks(releaseAvailability, releaseThread, releaseExecutionLock);
+    } finally {
+      inFlight.delete(jobId);
+      // An edit or immediate retry may consume its timer while this run is
+      // finishing. Reconcile after dropping the local execution guard.
+      timers.syncTimersWithJobs();
+      if (confirmation) requestStaleConfirmation(confirmation).catch((error) => console.error('Schedex confirmation:', error));
+    }
   }
+}
+
+async function releaseLocks(...releases) {
+  let error;
+  for (const release of releases) {
+    try { await release?.(); }
+    catch (failure) { error ??= failure; }
+  }
+  if (error) throw error;
 }
 
 async function settleJob(job, changes) {
@@ -276,7 +289,6 @@ async function recoverInterruptedJob(jobId) {
     timers.scheduleSendingRecovery(jobId);
     return;
   }
-  let recovered;
   inFlight.add(jobId);
   try {
     const job = jobStore.getJobs().find((candidate) => candidate.id === jobId);
@@ -288,17 +300,19 @@ async function recoverInterruptedJob(jobId) {
       return;
     }
     if (job.sendMode === 'available' && !job.submissionStartedAt && !job.turnId) {
-      recovered = await jobStore.updateActiveJob(job.id, { status: job.expiresAt <= Date.now() ? 'expired' : 'scheduled',
+      await jobStore.updateActiveJob(job.id, { status: job.expiresAt <= Date.now() ? 'expired' : 'scheduled',
         nextCheckAt: Date.now(), waitReason: job.expiresAt <= Date.now() ? 'expired' : 'checking' });
     } else {
       await settleJob(job, { status: job.submissionStartedAt || job.turnId ? 'review' : 'failed',
         waitReason: 'review', lastError: s('sendInterrupted') });
     }
   } finally {
-    await releaseExecutionLock();
-    inFlight.delete(jobId);
-    if (recovered?.status === 'scheduled') timers.scheduleTimer(recovered);
-    notifyChanged();
+    try { await releaseExecutionLock(); }
+    finally {
+      inFlight.delete(jobId);
+      timers.syncTimersWithJobs();
+      notifyChanged();
+    }
   }
 }
 

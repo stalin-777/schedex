@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Recover from transient file-sharing errors, report permanent recovery errors, and preserve rescheduled tasks during sender cleanup.
 - Scheduling captures conversation context before changing focus, handles repeated copying of the same link, requires a selection when unavailable, and loads the conversation list independently of model and quota requests.
 - Opening a task for editing applies it before background loading, preserving subsequent form changes.
 - Moving an uncertain delivery to History preserves Needs review and progress tracking instead of marking it cancelled.

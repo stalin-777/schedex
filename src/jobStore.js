@@ -5,6 +5,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 const { acquireFileLock } = require('./jobLocks');
+const { retryFileOperation } = require('./fileRetry');
 const { nextWakeAt, DAY, DEFAULT_WAIT_DAYS } = require('./availabilityPolicy');
 const { MAX_STORE_BYTES, HISTORY_PAGE_SIZE } = require('./limits');
 
@@ -101,10 +102,10 @@ async function writeJsonAtomic(filePath, value) {
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await fs.rename(tempPath, filePath);
+    await retryFileOperation(() => fs.rename(tempPath, filePath));
   } finally {
     if (handle) await handle.close().catch(() => {});
-    await fs.unlink(tempPath).catch(() => {});
+    await retryFileOperation(() => fs.unlink(tempPath)).catch(() => {});
   }
 }
 

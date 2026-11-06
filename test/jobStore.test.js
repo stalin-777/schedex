@@ -48,6 +48,25 @@ test('legacy tasks migrate once and a corrupt file is never overwritten with cac
   assert.equal(await fs.readFile(filePath, 'utf8'), '{broken');
 });
 
+test('a permanent atomic replacement failure preserves the previous file and releases storage ownership', async (t) => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-rename-denied-'));
+  let deny = false;
+  const host = createJobHost(folder, { io: { ...fs, rename: async (...args) => {
+    if (deny) throw Object.assign(new Error('Replacement remains denied'), { code: 'EPERM' });
+    return fs.rename(...args);
+  } } });
+  t.after(async () => { host.jobs.dispose(); await fs.rm(folder, { recursive: true, force: true }); });
+  await host.jobs.upsertJob({ id: 'kept', status: 'paused' });
+  const before = await fs.readFile(host.store.getJobsFilePath(), 'utf8');
+  deny = true;
+  await assert.rejects(host.jobs.upsertJob({ id: 'unsaved', status: 'paused' }), { code: 'EPERM' });
+  assert.equal(await fs.readFile(host.store.getJobsFilePath(), 'utf8'), before);
+  assert.equal((await fs.readdir(folder)).some((name) => name.endsWith('.tmp')), false);
+  const release = await host.locks.acquireFileLock('jobs');
+  assert.equal(typeof release, 'function');
+  await release();
+});
+
 test('retrying an old new-thread rollout failure preserves proof that its ID was provisional', async (t) => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-rollout-retry-'));
   const legacy = [

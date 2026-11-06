@@ -55,7 +55,7 @@ function createJobHost(storagePath, { runtime = {}, delivery, io = fileSystem, l
       if (request === 'vscode') return vscode;
       if (request === './runtime') return codex;
       if (request === './directDelivery' && delivery) return delivery;
-      if (request === './i18n') return { s: (key) => key };
+      if (request === './i18n') return { s: (key, params) => params?.error ? `${key}: ${params.error}` : key };
       if (request === 'fs/promises') return io;
       if (['./jobStore', './jobLocks', './jobTimers', './directDelivery', './availability'].includes(request)) return load(request.slice(2));
       return Module.prototype.require.call(this, request);

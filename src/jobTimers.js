@@ -42,8 +42,9 @@ function createJobTimers({ getJobs, executeJob, recoverInterruptedJob, removeCom
       if (stopped || !getJobs().some((job) => job.id === jobId && ['checking', 'sending'].includes(job.status))) return;
       try {
         await recoverInterruptedJob(jobId);
-      } catch (_) {
+      } catch (err) {
         scheduleSendingRecovery(jobId);
+        onTimerError(err);
       }
     }, LOCK_RETRY_MS);
     recovery.set(jobId, { handle });
@@ -81,8 +82,9 @@ function createJobTimers({ getJobs, executeJob, recoverInterruptedJob, removeCom
       if (['checking', 'sending'].includes(job.status)) {
         try {
           await recoverInterruptedJob(job.id);
-        } catch (_) {
+        } catch (err) {
           scheduleSendingRecovery(job.id);
+          onTimerError(err);
         }
       }
     }

@@ -4,6 +4,7 @@ const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { retryFileOperation } = require('./fileRetry');
 
 const LOCK_STALE_MS = 5 * 60 * 1000;
 
@@ -36,14 +37,14 @@ async function readOwner(filePath) {
 async function tryCreateLock(filePath, owner) {
   let handle;
   try {
-    handle = await fs.open(filePath, 'wx', 0o600);
+    handle = await retryFileOperation(() => fs.open(filePath, 'wx', 0o600));
     await handle.writeFile(JSON.stringify(owner));
     await handle.close();
     return true;
   } catch (err) {
     if (handle) {
       await handle.close().catch(() => {});
-      await fs.unlink(filePath).catch(() => {});
+      await retryFileOperation(() => fs.unlink(filePath)).catch(() => {});
     }
     if (err.code === 'EEXIST') return false;
     throw err;
@@ -51,19 +52,22 @@ async function tryCreateLock(filePath, owner) {
 }
 
 function createLockHandle(lockPath, owner) {
-  const release = async () => {
+  let releasing;
+  const release = () => releasing ??= retryFileOperation(async () => {
     try {
       const existing = await readOwner(lockPath);
       if (existing.token === owner.token && existing.completed !== true) await fs.unlink(lockPath);
-    } catch (_) {}
-  };
-  release.markCompleted = async () => {
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  });
+  release.markCompleted = () => retryFileOperation(async () => {
     const existing = await readOwner(lockPath);
     if (existing.token !== owner.token) throw new Error('Lost the Schedex job lock before recording completion');
     if (existing.completed === true) return;
     // Retain completion across restarts so no other window sends this job again.
     await fs.writeFile(lockPath, JSON.stringify({ ...owner, completed: true }), { mode: 0o600 });
-  };
+  });
   return release;
 }
 
@@ -98,12 +102,14 @@ async function removeStaleFileLock(lockPath) {
   const generation = owner?.token || `${stat.dev}-${stat.ino}-${Math.trunc(stat.mtimeMs)}`;
   if (!await acquireStaleCleanupTurn(lockPath, generation)) return false;
   try {
-    const currentStat = await fs.stat(lockPath);
-    if (currentStat.dev !== stat.dev || currentStat.ino !== stat.ino) return false;
-    const currentOwner = await readOwner(lockPath).catch(() => null);
-    if (owner?.token && currentOwner?.token !== owner.token) return false;
-    await fs.unlink(lockPath);
-    return true;
+    return await retryFileOperation(async () => {
+      const currentStat = await fs.stat(lockPath);
+      if (currentStat.dev !== stat.dev || currentStat.ino !== stat.ino) return false;
+      const currentOwner = await readOwner(lockPath).catch(() => null);
+      if (owner?.token && currentOwner?.token !== owner.token) return false;
+      await fs.unlink(lockPath);
+      return true;
+    });
   } catch (err) {
     return err.code === 'ENOENT';
   }

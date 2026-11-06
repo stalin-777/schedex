@@ -39,7 +39,8 @@ test('delivery receipts persist, progress updates across windows, and no history
   t.after(async () => { a.jobs.dispose(); b.jobs.dispose(); await fs.rm(folder, { recursive: true, force: true }); });
   const job = { id: 'history', threadMode: 'existing', threadId: 'thread', prompt: 'Run', status: 'scheduled', sendAt: Date.now() };
   await a.jobs.upsertJob(job); a.jobs.scheduleTimer(job);
-  await until(() => !a.jobs.getJobs().length);
+  await a.waitFor(() => a.jobs.getHistory().some((item) => item.id === job.id && item.status === 'queued'), undefined,
+    () => ({ sent, reads, otherWindowNotifications: b.notifications }));
   assert.equal(a.jobs.getHistory()[0].queuedSubmissionId, 'queue-1');
   assert.equal(a.jobs.getHistory()[0].status, 'queued');
   await Promise.all([a.jobs.refreshHistory(), b.jobs.refreshHistory()]);
@@ -53,6 +54,39 @@ test('delivery receipts persist, progress updates across windows, and no history
   await a.jobs.clearFinishedHistory();
   assert.equal(b.jobs.getHistory().length, 0);
 });
+
+for (const operation of ['open', 'unlink', 'rename', 'writeFile']) {
+  test(`two-window queue delivery survives a transient ${operation} sharing violation`, async (t) => {
+    const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-history-sharing-'));
+    let lockPath;
+    let failed = false;
+    let sends = 0;
+    const io = { ...fs, [operation]: async (...args) => {
+      const affected = operation === 'rename'
+        ? args[1] === path.join(folder, 'schedex.jobs.v1.json')
+        : args[0] === lockPath;
+      if (affected && !failed) {
+        failed = true;
+        throw Object.assign(new Error('Transient sharing violation'), { code: 'EPERM' });
+      }
+      return fs[operation](...args);
+    } };
+    const runtime = { queuePrompt: async () => { sends++; return { id: 'queue-1' }; } };
+    const a = createJobHost(folder, { runtime, io });
+    const b = createJobHost(folder, { runtime, io });
+    t.after(async () => { a.jobs.dispose(); b.jobs.dispose(); await fs.rm(folder, { recursive: true, force: true }); });
+    lockPath = a.locks.getLockPath(operation === 'writeFile' ? 'job:sharing-writeFile' : 'jobs');
+    const job = { id: 'sharing-' + operation, threadMode: 'existing', threadId: 'thread', prompt: 'Run once',
+      status: 'scheduled', sendAt: Date.now() };
+    await a.jobs.upsertJob(job); a.jobs.scheduleTimer(job);
+    await a.waitFor(() => a.jobs.getHistory().some((item) => item.id === job.id && item.status === 'queued'));
+    assert.equal(failed, true);
+    assert.equal(sends, 1);
+    assert.equal(b.jobs.getHistory()[0].queuedSubmissionId, 'queue-1');
+    await Promise.all([a.jobs.restoreTimers(), b.jobs.restoreTimers()]);
+    assert.equal(sends, 1);
+  });
+}
 
 test('removing a pending task archives cancellation and clearing finished history preserves queued work', async (t) => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'schedex-cancel-history-'));
